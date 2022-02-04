@@ -207,4 +207,8 @@ namespace Tool.Compet.Realtime {
 		[IgnoreMember]
 		public string FullName { get { return FirstName + LastName; } }
 	}
+
+	/// Extends `Attribute` to make this class is collectable via attribute-reflection.
+	public class DkRPC : Attribute {
+	}
 }
