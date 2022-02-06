@@ -5,11 +5,14 @@ namespace Tool.Compet.Realtime {
 	using System.Threading;
 	using System.Threading.Tasks;
 
-	using Cysharp.Threading.Tasks;
-	using MessagePack;
+	// using Cysharp.Threading.Tasks;
+	using Tool.Compet.MessagePack;
 
 	using Tool.Compet.Core;
 	using Tool.Compet.Log;
+	using System.Runtime.Serialization.Formatters.Binary;
+	using System.IO;
+	using System.Collections.Generic;
 
 	/// Socket (TCP vs UDP): https://en.wikipedia.org/wiki/Nagle%27s_algorithm
 	/// TCP test for Unity client: https://gist.github.com/danielbierwirth/0636650b005834204cb19ef5ae6ccedb
@@ -35,7 +38,7 @@ namespace Tool.Compet.Realtime {
 		private ClientWebSocket socket;
 
 		/// Socket url for realtime, for eg,. wss://darkcompet.com/gaming
-		private string realtimeSocketUrl;
+		private string socketUrl;
 
 		/// To avoid allocate new array when receive message from server.
 		private ArraySegment<byte> inBuffer;
@@ -47,34 +50,37 @@ namespace Tool.Compet.Realtime {
 		public static bool connected;
 
 		private long lastSentTime;
-		long testCounter;
 
-		public DkRealtimeNetwork(string networkSocketUrl, int bufferSize = 1 << 10) {
+		public Action OnConnected;
+
+		public DkRealtimeNetwork(string socketUrl, int bufferSize = 1 << 12) {
 			this.socket = new();
-			this.realtimeSocketUrl = networkSocketUrl;
+			this.socketUrl = socketUrl;
 			this.inBuffer = new ArraySegment<byte>(new byte[bufferSize], 0, bufferSize);
 
 			// var tcp = new System.Net.Sockets.TcpClient();
 		}
 
 		/// @param `accessToken`: For user-authentication if server required. Skip pass if does not need.
-		public async UniTask ConnectAsync() {
+		public async Task ConnectAsync() {
 			var socket = this.socket;
 
 			// [Connect to server]
 			// Url must be started with `wss` since server using `HTTPS`
 			// For cancellation token, also see `CancellationTokenSource, CancellationTokenSource.CancelAfter()` for detail.
 			var cancellationToken = CancellationToken.None;
-			if (this.authorization != null) {
-				socket.Options.SetRequestHeader("Authorization", this.authorization);
+			var authorization = this.authorization;
+			if (authorization != null) {
+				socket.Options.SetRequestHeader("Authorization", authorization);
 			}
 			await socket.ConnectAsync(
-				new Uri(realtimeSocketUrl),
+				new Uri(socketUrl),
 				cancellationToken
 			);
 			// Mark as connected
 			connected = true;
-			if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Connected to realtime server: {realtimeSocketUrl}"); }
+			this.OnConnected?.Invoke();
+			if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Connected to realtime server: {socketUrl}"); }
 
 			// [Awake server]
 			// After connected, server is waiting something from each client. why???
@@ -86,18 +92,47 @@ namespace Tool.Compet.Realtime {
 			// See: https://devblogs.microsoft.com/xamarin/developing-real-time-communication-apps-with-websocket/
 			await Task.Factory.StartNew(async () => {
 				while (!this.disconnectRequested) {
-					if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Receiveing-{++testCounter} data from server..."); }
-					// If we don't wait (use await) receive-method, this loop
-					// will be run immediately even though receive-method is not completed.
-					// => so we should await receive-method to make current thread wait reading server's event.
-					await ReceiveAsync<TestMessagePackObj>();
+					// Wait and Read server's message
+					await this.ReceiveAsync();
 				}
 			}, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 		}
 
+		int sendRpcCount;
+		public async Task SendRPC(string methodName, params object[] data) {
+			if (this.disconnectRequested) {
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "Skip SendRPC since disconnectRequested"); }
+				return;
+			}
+
+			var socket = this.socket;
+
+			// Action `send` must be performed while socket connection is open.
+			// Otherwise we get exception.
+			if (socket.State == WebSocketState.Open) {
+				this.lastSentTime = DkUtils.CurrentUnixTimeInMillis();
+
+				// var outBytes = this.Serialize(data);
+				var outBytes = MessagePackSerializer.Serialize(new TestMessagePackObj());
+
+				await socket.SendAsync(
+					new ArraySegment<byte>(outBytes),
+					WebSocketMessageType.Binary,
+					true,
+					CancellationToken.None
+				);
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{sendRpcCount}-SendRPC, length: {outBytes.Length}"); }
+			}
+			else {
+				DkLogs.Warning(this, $"Ignored SendRPC while socket-state is NOT open, current state: {socket.State}");
+			}
+		}
+
+		long sendCount;
 		/// Run in background.
 		/// bytes: Encoding.UTF8.GetBytes(DkJsons.Obj2Json(new UserProfileResponse()))
-		public async UniTask SendAsync(object? msgPackObj = null) {
+		/// Send obj: https://stackoverflow.com/questions/15012549/send-typed-objects-through-tcp-or-sockets
+		public async Task SendAsync(object? msgPackObj = null) {
 			if (this.disconnectRequested) {
 				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "Skip sending since disconnectRequested"); }
 				return;
@@ -110,7 +145,12 @@ namespace Tool.Compet.Realtime {
 			if (socket.State == WebSocketState.Open) {
 				this.lastSentTime = DkUtils.CurrentUnixTimeInMillis();
 
-				var outBytes = Encoding.UTF8.GetBytes("MessagePackSerializer.Serialize(msgPackObj);");
+				// var outBytes = Encoding.UTF8.GetBytes("client test message");
+				var outBytes = MessagePackSerializer.Serialize(new TestMessagePackObj {
+					FirstName = "dk111",
+					LastName = "cm222",
+					Age = 100,
+				});
 
 				await socket.SendAsync(
 					new ArraySegment<byte>(outBytes),
@@ -118,47 +158,74 @@ namespace Tool.Compet.Realtime {
 					true,
 					CancellationToken.None
 				);
-				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Sent-{++testCounter} to realtime server async"); }
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{++sendCount}-Sent to realtime server async"); }
 			}
 			else {
 				DkLogs.Warning(this, $"Ignored send while socket-state is NOT open, current state: {socket.State}");
 			}
 		}
 
+		int receiveCount;
 		/// Run in background.
-		private async UniTask ReceiveAsync<T>() where T : class {
+		private async Task ReceiveAsync() {
 			var socket = this.socket;
 			var inBuffer = this.inBuffer;
 
+			if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Entered ReceiveAsync, socket.State: {socket.State}"); }
+
 			// Action `send` must be performed while socket connection is open.
 			// Otherwise we get exception.
-			if (socket.State == WebSocketState.Open) {
-				// Read server-message and fill full into the buffer.
-				// If we wanna looping to read as chunks (XXX bytes), we can check with `serverResult.EndOfMessage`
-				// to detect when reading message (line) get completed.
-				var inResult = await socket.ReceiveAsync(
-					inBuffer,
-					CancellationToken.None
-				);
+			if (socket.State != WebSocketState.Open) {
+				DkLogs.Warning(this, $"Ignored receive while socket-state is NOT open, current state: {socket.State}");
+				return;
+			}
 
-				// Server closes the connection
-				if (inResult.CloseStatus.HasValue) {
-					if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "Skip read message since socket was closed"); }
-				}
-				else {
+			// Read server-message and fill full into the buffer.
+			// If we wanna looping to read as chunks (XXX bytes), we can check with `serverResult.EndOfMessage`
+			// to detect when reading message (line) get completed.
+			var inResult = await socket.ReceiveAsync(
+				inBuffer,
+				CancellationToken.None
+			);
+
+			// Server closes the connection
+			if (inResult.CloseStatus.HasValue) {
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "Skip read message since socket was closed"); }
+				return;
+			}
+
+			// [Parse server's message]
+			switch (inResult.MessageType) {
+				case WebSocketMessageType.Text: {
 					// dkopt: avoid re-allocate new array by impl new deserialization method
-					// To copy different array-types, consider use `Buffer.BlockCopy`.
 					var fromArr = inBuffer.Array;
 					// var toArr = new byte[inResult.Count];
 					// Array.Copy(fromArr, toArr, inResult.Count);
 					// var result = MessagePackSerializer.Deserialize<T>(resultArr);
-					var result = Encoding.UTF8.GetString(fromArr, 0, inResult.Count);
 
-					DkLogs.Info(this, $"Got result after {DkUtils.CurrentUnixTimeInMillis() - lastSentTime} millis, result: {result}");
+					var result = Encoding.UTF8.GetString(fromArr, 0, inResult.Count);
+					DkLogs.Info(this, $"{++receiveCount}-Got text after {DkUtils.CurrentUnixTimeInMillis() - lastSentTime} millis, result: {result}");
+					break;
 				}
-			}
-			else {
-				DkLogs.Warning(this, "Ignored receive while socket-state is NOT open, current state: " + socket.State);
+				case WebSocketMessageType.Binary: {
+					// dkopt: avoid re-allocate new array by impl new deserialization method
+					// To copy different array-types, consider use `Buffer.BlockCopy`.
+					var fromArr = inBuffer.Array;
+
+					// var result = this.Deserialize(fromArr, 0, inResult.Count);
+
+					var toArr = new byte[inResult.Count];
+					Array.Copy(fromArr, 0, toArr, 0, inResult.Count);
+					var result = MessagePackSerializer.Deserialize<TestMessagePackObj>(toArr);
+
+
+					DkLogs.Info(this, $"{++receiveCount}-Got binary after {DkUtils.CurrentUnixTimeInMillis() - lastSentTime} millis, inResult.Count: {inResult.Count}, result: ", result);
+					break;
+				}
+				default: {
+					if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"Unhandled inResult.MessageType: {inResult.MessageType}"); }
+					break;
+				}
 			}
 		}
 
@@ -187,25 +254,43 @@ namespace Tool.Compet.Realtime {
 				DkLogs.Warning(this, $"Error when dispose socket, error: {e.Message}");
 			}
 		}
-	}
 
-	[MessagePackObject]
-	public class TestMessagePackObj {
-		// Key attributes take a serialization index (or string name)
-		// The values must be unique and versioning has to be considered as well.
-		// Keys are described in later sections in more detail.
-		[Key(0)]
-		public int Age { get; set; } = 100;
+		/// Convert obj to bytes.
+		private byte[] Serialize(object obj) {
+			if (obj == null) {
+				return null;
+			}
 
-		[Key(1)]
-		public string FirstName { get; set; } = "dark";
+			// var objects = new object[] { 1, "aaa", new { Anything = 9999 } };
+			return MessagePackSerializer.Serialize(obj).AlsoDk(bytes => {
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "serialized to: " + MessagePackSerializer.ConvertToJson(bytes)); };
+			});
 
-		[Key(2)]
-		public string LastName { get; set; } = "compet";
+			// var formatter = new BinaryFormatter();
+			// var stream = new MemoryStream();
+			// formatter.Serialize(stream, obj);
 
-		// All fields or properties that should not be serialized must be annotated with [IgnoreMember].
-		[IgnoreMember]
-		public string FullName { get { return FirstName + LastName; } }
+			// return stream.ToArray();
+		}
+
+		/// Convert bytes to obj.
+		private object Deserialize(byte[] bytes, int offset, int count) {
+			if (bytes == null) {
+				return null;
+			}
+
+			var dst = new byte[count];
+			Array.Copy(bytes, offset, dst, 0, count);
+			if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, "deserialized to: " + MessagePackSerializer.ConvertToJson(dst)); }
+			return MessagePackSerializer.Deserialize<object>(dst);
+
+			// var stream = new MemoryStream();
+			// var formatter = new BinaryFormatter();
+			// stream.Write(bytes, offset, count);
+			// stream.Seek(offset, SeekOrigin.Begin);
+
+			// return formatter.Deserialize(stream);
+		}
 	}
 
 	/// Extends `Attribute` to make this class is collectable via attribute-reflection.
