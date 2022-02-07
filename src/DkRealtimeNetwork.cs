@@ -5,14 +5,9 @@ namespace Tool.Compet.Realtime {
 	using System.Threading;
 	using System.Threading.Tasks;
 
-	// using Cysharp.Threading.Tasks;
-	using Tool.Compet.MessagePack;
-
 	using Tool.Compet.Core;
 	using Tool.Compet.Log;
-	using System.Runtime.Serialization.Formatters.Binary;
-	using System.IO;
-	using System.Collections.Generic;
+	using MessagePack;
 
 	/// Socket (TCP vs UDP): https://en.wikipedia.org/wiki/Nagle%27s_algorithm
 	/// TCP test for Unity client: https://gist.github.com/danielbierwirth/0636650b005834204cb19ef5ae6ccedb
@@ -115,13 +110,15 @@ namespace Tool.Compet.Realtime {
 				// var outBytes = this.Serialize(data);
 				var outBytes = MessagePackSerializer.Serialize(new TestMessagePackObj());
 
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{++sendRpcCount}-SendRPC sending...: {outBytes.Length} bytes"); }
+
 				await socket.SendAsync(
 					new ArraySegment<byte>(outBytes),
 					WebSocketMessageType.Binary,
 					true,
 					CancellationToken.None
 				);
-				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{sendRpcCount}-SendRPC, length: {outBytes.Length}"); }
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{sendRpcCount}-SendRPC done"); }
 			}
 			else {
 				DkLogs.Warning(this, $"Ignored SendRPC while socket-state is NOT open, current state: {socket.State}");
@@ -145,12 +142,7 @@ namespace Tool.Compet.Realtime {
 			if (socket.State == WebSocketState.Open) {
 				this.lastSentTime = DkUtils.CurrentUnixTimeInMillis();
 
-				// var outBytes = Encoding.UTF8.GetBytes("client test message");
-				var outBytes = MessagePackSerializer.Serialize(new TestMessagePackObj {
-					FirstName = "dk111",
-					LastName = "cm222",
-					Age = 100,
-				});
+				var outBytes = Encoding.UTF8.GetBytes("client test message");
 
 				await socket.SendAsync(
 					new ArraySegment<byte>(outBytes),
@@ -158,7 +150,7 @@ namespace Tool.Compet.Realtime {
 					true,
 					CancellationToken.None
 				);
-				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{++sendCount}-Sent to realtime server async"); }
+				if (DkBuildConfig.DEBUG) { DkLogs.Debug(this, $"{++sendCount}-SendAsync done {outBytes.Length} bytes"); }
 			}
 			else {
 				DkLogs.Warning(this, $"Ignored send while socket-state is NOT open, current state: {socket.State}");
@@ -217,7 +209,6 @@ namespace Tool.Compet.Realtime {
 					var toArr = new byte[inResult.Count];
 					Array.Copy(fromArr, 0, toArr, 0, inResult.Count);
 					var result = MessagePackSerializer.Deserialize<TestMessagePackObj>(toArr);
-
 
 					DkLogs.Info(this, $"{++receiveCount}-Got binary after {DkUtils.CurrentUnixTimeInMillis() - lastSentTime} millis, inResult.Count: {inResult.Count}, result: ", result);
 					break;

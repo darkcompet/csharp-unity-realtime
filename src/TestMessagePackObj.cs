@@ -1,9 +1,5 @@
 namespace Tool.Compet.Realtime {
-	using Tool.Compet.MessagePack;
-
-	using System.Runtime.Serialization.Formatters.Binary;
-	using System.IO;
-	using System.Collections.Generic;
+	using MessagePack;
 
 	[MessagePackObject]
 	public class TestMessagePackObj {
